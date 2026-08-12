@@ -146,37 +146,58 @@ class Ship {
     this.dead          = false;
   }
 
+  // Valores de maniobra por defecto. Los power-ups los alteran vía
+  // `powerUps.statsNave()` en vez de tocar constantes fijas.
+  stats() {
+    return powerUps.statsNave({
+      rot:      3.5,        // rad/s
+      thrust:   260,        // px/s²
+      drag:     0.987,
+      velMax:   Infinity,   // px/s
+      cadencia: 0.2,        // s entre disparos
+    });
+  }
+
   update(dt) {
     if (this.dead) return;
+    dt *= powerUps.escalaTiempo('nave');
+
     if (this.invincible    > 0) this.invincible    -= dt;
     if (this.shootCooldown > 0) this.shootCooldown -= dt;
 
-    const ROT   = 3.5;   // rad/s
-    const THRUST = 260;  // px/s²
-    const DRAG   = 0.987;
+    const st = this.stats();
 
-    if (keys['ArrowLeft'])  this.angle -= ROT * dt;
-    if (keys['ArrowRight']) this.angle += ROT * dt;
+    if (keys['ArrowLeft'])  this.angle -= st.rot * dt;
+    if (keys['ArrowRight']) this.angle += st.rot * dt;
 
     this.thrusting = !!keys['ArrowUp'];
     if (this.thrusting) {
-      this.vx += Math.cos(this.angle) * THRUST * dt;
-      this.vy += Math.sin(this.angle) * THRUST * dt;
+      this.vx += Math.cos(this.angle) * st.thrust * dt;
+      this.vy += Math.sin(this.angle) * st.thrust * dt;
     }
 
-    this.vx *= DRAG;
-    this.vy *= DRAG;
+    this.vx *= st.drag;
+    this.vy *= st.drag;
+
+    if (st.velMax !== Infinity) {
+      const v = Math.hypot(this.vx, this.vy);
+      if (v > st.velMax) {
+        this.vx = (this.vx / v) * st.velMax;
+        this.vy = (this.vy / v) * st.velMax;
+      }
+    }
+
     this.x = wrap(this.x + this.vx * dt, W);
     this.y = wrap(this.y + this.vy * dt, H);
   }
 
   tryShoot() {
     if (this.shootCooldown > 0 || this.dead) return [];
-    this.shootCooldown = 0.2;
+    this.shootCooldown = this.stats().cadencia;
     const NOSE = 21;
     const ox = this.x + Math.cos(this.angle) * NOSE;
     const oy = this.y + Math.sin(this.angle) * NOSE;
-    return [new Bullet(ox, oy, this.angle)];
+    return powerUps.transformarDisparo([new Bullet(ox, oy, this.angle)], this);
   }
 
   draw() {
@@ -247,10 +268,32 @@ class Particle {
 }
 
 // ── Estado del juego ──────────────────────────────────────────────────────────
-let ship, bullets, asteroids, particles;
+let ship, bullets, asteroids, particles, items;
 let score, lives, level;
 let state;      // 'playing' | 'dead' | 'gameover'
 let deadTimer;
+
+// Contexto que game.js entrega a los power-ups. Las listas se exponen con
+// getters porque se reasignan cada frame al filtrar los muertos; los efectos
+// deben mutarlas in situ (marcar `dead = true`), nunca reasignarlas.
+const juego = {
+  get nave()       { return ship; },
+  get asteroides() { return asteroids; },
+  get balas()      { return bullets; },
+  get particulas() { return particles; },
+  get nivel()      { return level; },
+  get puntaje()    { return score; },
+  sumarPuntos(n)   { score += n; },
+  explotar(x, y, n) { explode(x, y, n); },
+  // Destruye un asteroide sin partirlo (lo usa la Bomba Nova)
+  desintegrar(a) {
+    if (a.dead) return;
+    a.dead = true;
+    score += POINTS[a.size];
+    explode(a.x, a.y, a.size * 5);
+  },
+  POINTS,
+};
 
 function spawnAsteroids(count) {
   const SAFE_DIST = 130;
@@ -269,6 +312,8 @@ function initGame() {
   bullets   = [];
   asteroids = [];
   particles = [];
+  items     = [];
+  powerUps.reset();
   score  = 0;
   lives  = 3;
   level  = 1;
@@ -280,6 +325,7 @@ function nextLevel() {
   level++;
   bullets   = [];
   particles = [];
+  items     = [];   // los ítems no recogidos no cruzan de nivel
   ship.reset();
   spawnAsteroids(3 + level);
 }
@@ -288,8 +334,12 @@ function explode(x, y, count = 8) {
   for (let i = 0; i < count; i++) particles.push(new Particle(x, y));
 }
 
-function killShip() {
+function killShip(asteroide) {
+  // Un power-up puede absorber el golpe (escudo) y cancelar la muerte
+  if (powerUps.intentarAbsorber(juego, asteroide)) return;
+
   explode(ship.x, ship.y, 14);
+  powerUps.reset();   // al morir se pierden los efectos activos
   ship.dead = true;
   lives--;
   if (lives <= 0) {
@@ -318,21 +368,33 @@ function update(dt) {
     return;
   }
 
+  // Activación manual de power-ups para depurar (Digit1..Digit9)
+  if (DEBUG_POWERUPS) {
+    for (let i = 0; i < Math.min(POWERUPS.length, 9); i++)
+      if (pressed(`Digit${i + 1}`)) powerUps.activar(POWERUPS[i], juego);
+  }
+
   // Disparar
   if (pressed('Space')) {
     bullets.push(...ship.tryShoot());
   }
 
+  powerUps.update(dt, juego);
+
+  const dtAsteroides = dt * powerUps.escalaTiempo('asteroides');
+
   ship.update(dt);
-  bullets.forEach(b => b.update(dt));
-  asteroids.forEach(a => a.update(dt));
-  particles.forEach(p => p.update(dt));
+  bullets.forEach(b => b.update(dt * powerUps.escalaTiempo('balas')));
+  asteroids.forEach(a => a.update(dtAsteroides));
+  particles.forEach(p => p.update(dt * powerUps.escalaTiempo('particulas')));
+  items.forEach(it => it.update(dtAsteroides));
 
   bullets   = bullets.filter(b => !b.dead);
   particles = particles.filter(p => !p.dead);
 
   // Bala vs asteroide
   const newAsteroids = [];
+  const newItems     = [];
   for (const b of bullets) {
     for (const a of asteroids) {
       if (!a.dead && !b.dead && dist(b, a) < a.radius) {
@@ -341,17 +403,34 @@ function update(dt) {
         score += POINTS[a.size];
         explode(a.x, a.y, a.size * 5);
         newAsteroids.push(...a.split());
+        const item = intentarSoltarPowerUp(a.x, a.y);
+        if (item) newItems.push(item);
       }
     }
   }
   asteroids = asteroids.filter(a => !a.dead).concat(newAsteroids);
   bullets   = bullets.filter(b => !b.dead);
 
+  // Nave vs ítem
+  if (!ship.dead) {
+    for (const it of items) {
+      if (!it.dead && dist(ship, it) < ship.radius + it.radius) {
+        it.dead = true;
+        powerUps.activar(it.def, juego);
+      }
+    }
+  }
+  items = items.filter(it => !it.dead).concat(newItems);
+
+  // Un power-up recogido pudo marcar asteroides (Bomba Nova): limpiar antes de
+  // comprobar la colisión con la nave, para que un muerto no la mate.
+  asteroids = asteroids.filter(a => !a.dead);
+
   // Nave vs asteroide
   if (ship.invincible <= 0) {
     for (const a of asteroids) {
       if (dist(ship, a) < ship.radius + a.radius * 0.82) {
-        killShip();
+        killShip(a);
         break;
       }
     }
@@ -410,10 +489,14 @@ function draw() {
 
   particles.forEach(p => p.draw());
   asteroids.forEach(a => a.draw());
+  items.forEach(it => it.draw());
   bullets.forEach(b => b.draw());
   ship.draw();
+  if (!ship.dead) powerUps.dibujarNave(ship);
+  powerUps.dibujarMundo();
 
   drawHUD();
+  powerUps.dibujarHUD();
 
   if (state === 'gameover')
     drawOverlay('GAME OVER', `PUNTAJE: ${score}   —   ESPACIO PARA REINICIAR`);
