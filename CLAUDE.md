@@ -15,7 +15,7 @@ There is no test or lint command to run — verification is done by playing the 
 
 ## Architecture
 
-The entire game is `game.js` (~420 lines), split by `// ── Name ──` banner comments into:
+The game engine is `game.js` (~470 lines), split by `// ── Name ──` banner comments into:
 input, utils, entity classes (`Bullet`, `Asteroid`, `Ship`, `Particle`), module-level game
 state, `update(dt)`, `draw()`, and the main loop. `index.html` only provides the fixed
 800×600 canvas and page styling; `W`/`H` in `game.js` are hardcoded to match it.
@@ -38,6 +38,21 @@ arguments. Any class using canvas transforms brackets them in `ctx.save()`/`ctx.
 Positions wrap toroidally through `wrap()` on every update. Reuse the existing helpers
 `wrap`, `dist`, `rand`, `randInt` rather than reimplementing them.
 
+### Power-ups
+
+`powerups.js` holds the shared power-up infrastructure — registry, the `PowerUpItem`
+pickup entity, and the `powerUps` manager of active effects. Individual power-ups live one
+per file in `powerups/`, self-register via `registerPowerUp({...})`, and are loaded from
+`index.html` between the `powerups:inicio` / `powerups:fin` markers. `game.js` only calls
+hooks (`statsNave`, `transformarDisparo`, `escalaTiempo`, `intentarAbsorber`,
+`dibujarNave`, `dibujarMundo`, `dibujarHUD`) and passes the `juego` context object.
+
+Adding a power-up should touch **only** a new file in `powerups/` plus one `<script>` line —
+that keeps parallel feature branches conflict-free. Read `docs/POWERUPS.md` first; it holds
+the full hook contract. Load order matters: `powerups.js` → `powerups/*.js` → `game.js`.
+
+`DEBUG_POWERUPS` (`powerups.js`) is `true`: keys 1–9 activate the nth registered power-up.
+
 ### Spawning and despawning
 
 Entities are never spliced mid-loop. Instead they set `dead = true`, arrays are rebuilt with
@@ -52,8 +67,11 @@ array and concatenated after the collision loop finishes — see `game.js:324-33
   frame. Held-key actions (rotate, thrust) use `keys[code]` directly instead.
 - Ship/asteroid collision multiplies the asteroid radius by `0.82` (`game.js:342`) — a
   deliberate fudge to make near-misses feel fair. Bullet/asteroid collision uses the full radius.
-- Tuning constants are inline `const`s at their point of use (`ROT`, `THRUST`, `DRAG` in
-  `Ship.update`; `SPEED` in the `Bullet` constructor). There is no central config object.
+- Ship tuning now lives in `Ship.stats()` (`rot`, `thrust`, `drag`, `velMax`, `cadencia`)
+  so power-ups can override it; other constants are still inline `const`s at their point of
+  use (`SPEED` in the `Bullet` constructor). There is no central config object.
+- `juego.asteroides`/`balas`/`particulas` are getters, because `update()` reassigns those
+  arrays every frame. Power-up code must mutate them in place, never reassign.
 
 ## Conventions
 
@@ -61,5 +79,6 @@ UI text and code comments are in Spanish (`NIVEL`, `PUNTAJE: …`, `ESPACIO PARA
 Match that when adding either. Rendering is vector-style: white strokes on black, no images
 or sprites.
 
-Note: the README advertises power-ups and an "estrella fugaz" asteroid type. Neither exists
-in `game.js` — treat them as unimplemented.
+Note: the README advertises power-ups and an "estrella fugaz" asteroid type. The power-up
+*infrastructure* exists (see above) but no concrete power-up ships on this branch — they are
+being built one per branch. "Estrella fugaz" remains unimplemented.
